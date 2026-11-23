@@ -30,4 +30,39 @@ public interface SeaTunnelRowSerializer<K, V> {
      * @return kafka record.
      */
     ProducerRecord<K, V> serializeRow(SeaTunnelRow row);
+
+    /**
+     * Whether this serializer can write an update pair as one record through {@link
+     * #serializeUpdate(SeaTunnelRow, SeaTunnelRow)}.
+     *
+     * @return true if update pairs can be merged
+     */
+    default boolean supportsUpdateMerge() {
+        return false;
+    }
+
+    /**
+     * Whether an update pair can be written as one record without changing where it is routed. The
+     * rows must belong to the same table and resolve to the same topic, partition and message key.
+     *
+     * @param before the {@code UPDATE_BEFORE} row
+     * @param after the {@code UPDATE_AFTER} row
+     * @return true if the pair can be merged
+     */
+    default boolean canMergeUpdate(SeaTunnelRow before, SeaTunnelRow after) {
+        return false;
+    }
+
+    /**
+     * Serialize an update pair to one Kafka {@link ProducerRecord}. The record takes its topic,
+     * partition, key and headers from the after row.
+     *
+     * @param before the {@code UPDATE_BEFORE} row
+     * @param after the {@code UPDATE_AFTER} row
+     * @return kafka record.
+     */
+    default ProducerRecord<K, V> serializeUpdate(SeaTunnelRow before, SeaTunnelRow after) {
+        throw new UnsupportedOperationException(
+                getClass().getSimpleName() + " does not support merging update events");
+    }
 }

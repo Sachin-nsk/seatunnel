@@ -62,6 +62,16 @@ public class KafkaSinkOptions extends KafkaBaseOptions {
                             "Configure which fields are used as the value of the kafka message. "
                                     + "If not specified, all fields in the row (except headers) will be used.");
 
+    public static final Option<Boolean> MERGE_UPDATE_EVENT =
+            Options.key("merge_update_event")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Only supported for the canal_json format. When true, an UPDATE_BEFORE and "
+                                    + "UPDATE_AFTER pair is written as one Canal UPDATE message, with the "
+                                    + "new row in data and the old row in old. When false, the pair is "
+                                    + "written as a DELETE message followed by an INSERT message.");
+
     public static final Option<KafkaSemantics> SEMANTICS =
             Options.key("semantics")
                     .enumType(KafkaSemantics.class)

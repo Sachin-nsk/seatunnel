@@ -17,8 +17,11 @@
 
 package org.apache.seatunnel.connectors.seatunnel.kafka.sink;
 
+import org.apache.seatunnel.shade.com.google.common.annotations.VisibleForTesting;
+
 import org.apache.seatunnel.api.configuration.ReadonlyConfig;
 import org.apache.seatunnel.api.sink.SinkWriter;
+import org.apache.seatunnel.api.table.type.RowKind;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
 import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
@@ -54,6 +57,9 @@ public class KafkaSinkWriter implements SinkWriter<SeaTunnelRow, KafkaCommitInfo
 
     private final KafkaProduceSender<byte[], byte[]> kafkaProducerSender;
     private final SeaTunnelRowSerializer<byte[], byte[]> seaTunnelRowSerializer;
+
+    /** UPDATE_BEFORE row waiting for its UPDATE_AFTER when merge_update_event is enabled. */
+    private SeaTunnelRow pendingUpdateBefore;
 
     private static final int PREFIX_RANGE = 10000;
 
@@ -92,11 +98,59 @@ public class KafkaSinkWriter implements SinkWriter<SeaTunnelRow, KafkaCommitInfo
         }
     }
 
+    /** Creates a writer with a given serializer and sender, for tests only. */
+    @VisibleForTesting
+    KafkaSinkWriter(
+            SinkWriter.Context context,
+            SeaTunnelRowSerializer<byte[], byte[]> seaTunnelRowSerializer,
+            KafkaProduceSender<byte[], byte[]> kafkaProducerSender) {
+        this.context = context;
+        this.seaTunnelRowSerializer = seaTunnelRowSerializer;
+        this.kafkaProducerSender = kafkaProducerSender;
+    }
+
     @Override
     public void write(SeaTunnelRow element) {
+        if (seaTunnelRowSerializer.supportsUpdateMerge()) {
+            writeWithUpdateMerge(element);
+            return;
+        }
         ProducerRecord<byte[], byte[]> producerRecord =
                 seaTunnelRowSerializer.serializeRow(element);
         kafkaProducerSender.send(producerRecord);
+    }
+
+    /**
+     * Holds an UPDATE_BEFORE row until the next row arrives. If that row is the matching
+     * UPDATE_AFTER and routes to the same topic, partition and key, the pair is sent as one record.
+     * Otherwise the held row is sent on its own, as it would be without merging, so no row is
+     * dropped or reordered.
+     */
+    private void writeWithUpdateMerge(SeaTunnelRow element) {
+        if (pendingUpdateBefore != null
+                && element.getRowKind() == RowKind.UPDATE_AFTER
+                && seaTunnelRowSerializer.canMergeUpdate(pendingUpdateBefore, element)) {
+            kafkaProducerSender.send(
+                    seaTunnelRowSerializer.serializeUpdate(pendingUpdateBefore, element));
+            pendingUpdateBefore = null;
+            return;
+        }
+        flushPendingUpdateBefore();
+        if (element.getRowKind() == RowKind.UPDATE_BEFORE) {
+            // Copy the row because upstream may reuse the instance for the next row.
+            pendingUpdateBefore = element.copy();
+        } else {
+            kafkaProducerSender.send(seaTunnelRowSerializer.serializeRow(element));
+        }
+    }
+
+    /** Sends a held UPDATE_BEFORE row on its own, as a DELETE message. */
+    private void flushPendingUpdateBefore() {
+        if (pendingUpdateBefore != null) {
+            SeaTunnelRow updateBefore = pendingUpdateBefore;
+            pendingUpdateBefore = null;
+            kafkaProducerSender.send(seaTunnelRowSerializer.serializeRow(updateBefore));
+        }
     }
 
     @Override
@@ -108,8 +162,14 @@ public class KafkaSinkWriter implements SinkWriter<SeaTunnelRow, KafkaCommitInfo
         return states;
     }
 
+    /**
+     * Prepares the commit for the current checkpoint. A held UPDATE_BEFORE row is sent first, so it
+     * belongs to this checkpoint (and this transaction in exactly-once mode) and no pending row
+     * needs to be kept in the writer state.
+     */
     @Override
     public Optional<KafkaCommitInfo> prepareCommit() {
+        flushPendingUpdateBefore();
         return kafkaProducerSender.prepareCommit();
     }
 
@@ -121,7 +181,11 @@ public class KafkaSinkWriter implements SinkWriter<SeaTunnelRow, KafkaCommitInfo
     @Override
     public void close() {
         try {
-            kafkaProducerSender.close();
+            try {
+                flushPendingUpdateBefore();
+            } finally {
+                kafkaProducerSender.close();
+            }
         } catch (Exception e) {
             throw new KafkaConnectorException(
                     CommonErrorCodeDeprecated.WRITER_OPERATION_FAILED,

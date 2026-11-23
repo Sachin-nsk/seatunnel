@@ -62,6 +62,7 @@ Dry-run 诊断指出无效选项（包括 `topic` 中引用缺失字段的 `${fi
 | assign_partitions    | Array  | 否    | -    | 可以根据消息的内容决定发送哪个分区,该参数的作用是分发信息                                                                                                                                                                                                                                      |
 | transaction_prefix   | String | 否    | -    | 当 `semantics` 为 `EXACTLY_ONCE` 时，生产者会把消息写入 Kafka 事务。Kafka 通过 transaction id 区分不同事务，因此不同作业应使用不同前缀。                                                                                                                                           |
 | format               | String | 否    | json | 数据格式。默认格式是json。可选 text, canal_json, debezium_json, compatible_debezium_json, ogg_json, maxwell_json, avro, protobuf 和 native。如果使用 json 或 text 格式，默认字段分隔符是 `,`。如果自定义分隔符，请添加 `field_delimiter` 选项。如果使用 canal 格式，请参考 [canal-json](../formats/canal-json.md)。如果使用 debezium 格式，请参阅 [debezium-json](../formats/debezium-json.md) 了解详细信息 |
+| merge_update_event   | Boolean | 否   | false | 当格式设置为 canal_json 时生效。设为 `true` 时，每次更新写为一条 Canal `UPDATE` 消息，而不是一条 `DELETE` 消息加一条 `INSERT` 消息。详见 [合并更新事件](#合并更新事件)。 |
 | field_delimiter      | String | 否    | ,    | 自定义数据格式的字段分隔符                                                                                                                                                                                                                                                      |
 | common-options       |        | 否    | -    | Sink插件常用参数，请参考 [Sink常用选项 ](../common-options/sink-common-options.md) 了解详情                                                                                                                                                                                                         |
 |protobuf_message_name|String|否|-| format配置为protobuf时生效，取Message名称                                                                                                                                                                                                                                    |
@@ -110,6 +111,32 @@ NON 不提供任何保证：如果 Kafka 代理出现问题，消息可能会丢
 如果没有设置分区键字段，则将发送空消息键。
 消息 key 的格式为 json，如果设置 name 为 key，例如 `{"name":"Jack"}`。
 所选的字段必须是上游数据中已存在的字段。
+
+### 合并更新事件
+
+仅支持 `canal_json` 格式，其他格式会报错。
+
+默认情况下，一次更新以 `UPDATE_BEFORE` 行和 `UPDATE_AFTER` 行到达 sink，sink 会写出一条 `DELETE` 消息和一条 `INSERT` 消息。设置 `merge_update_event = true` 后，这对行会写为一条 Canal `UPDATE` 消息，`data` 中是新行，`old` 中是完整的旧行：
+
+```json
+{"old":[{"id":1,"name":"a"}],"data":[{"id":1,"name":"b"}],"type":"UPDATE","database":"db","table":"t","ts":1697788900619}
+```
+
+- 合并后的消息使用新行的 topic、分区、key 和 headers，因此与它所替代的 `INSERT` 消息路由相同。
+- 只有两行属于同一张表，并且 topic、分区和 `partition_key_fields` 的值都相同时才会合并。否则（例如 key 列或 topic 字段发生变化），sink 仍会写出 `DELETE` 和 `INSERT` 消息。
+- 后面没有对应 `UPDATE_AFTER` 的 `UPDATE_BEFORE` 行写为 `DELETE` 消息，没有 `UPDATE_BEFORE` 的 `UPDATE_AFTER` 行写为 `INSERT` 消息。不会丢失或重排任何行。
+- 在 checkpoint 时仍在等待配对的 `UPDATE_BEFORE` 行会在 checkpoint 之前写为 `DELETE` 消息，因此不需要保存在 sink 状态中。
+
+```hocon
+sink {
+  Kafka {
+    bootstrap.servers = "localhost:9092"
+    topic = "canal_topic"
+    format = canal_json
+    merge_update_event = true
+  }
+}
+```
 
 ### Kafka Headers 字段
 

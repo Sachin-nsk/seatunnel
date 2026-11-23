@@ -21,6 +21,7 @@ package org.apache.seatunnel.format.json.canal;
 import org.apache.seatunnel.api.source.Collector;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.CatalogTableUtil;
+import org.apache.seatunnel.api.table.type.RowKind;
 import org.apache.seatunnel.api.table.type.SeaTunnelDataType;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
@@ -65,6 +66,44 @@ public class CanalJsonSerDeSchemaTest {
                         .setTable("^prod.*")
                         .build();
         runTest(lines, deserializationSchema);
+    }
+
+    @Test
+    public void testSerializeUpdate() throws Exception {
+        SeaTunnelRow before = new SeaTunnelRow(new Object[] {101, "scooter", null, 3.14f});
+        before.setRowKind(RowKind.UPDATE_BEFORE);
+        before.setTableId("inventory.products");
+        SeaTunnelRow after = new SeaTunnelRow(new Object[] {101, "scooter", "small", 5.17f});
+        after.setRowKind(RowKind.UPDATE_AFTER);
+        after.setTableId("inventory.products");
+
+        CanalJsonSerializationSchema serializationSchema =
+                new CanalJsonSerializationSchema(SEATUNNEL_ROW_TYPE);
+        byte[] update = serializationSchema.serializeUpdate(before, after);
+        assertEquals(
+                "{\"old\":[{\"id\":101,\"name\":\"scooter\",\"description\":null,\"weight\":3.14}],"
+                        + "\"data\":[{\"id\":101,\"name\":\"scooter\",\"description\":\"small\",\"weight\":5.17}],"
+                        + "\"type\":\"UPDATE\",\"database\":\"inventory\",\"table\":\"products\",\"ts\":null}",
+                new String(update, StandardCharsets.UTF_8));
+
+        // serializeUpdate keeps no state, so the next row is serialized as before.
+        assertEquals(
+                "{\"old\":null,"
+                        + "\"data\":[{\"id\":101,\"name\":\"scooter\",\"description\":\"small\",\"weight\":5.17}],"
+                        + "\"type\":\"INSERT\",\"database\":\"inventory\",\"table\":\"products\",\"ts\":null}",
+                new String(serializationSchema.serialize(after), StandardCharsets.UTF_8));
+
+        // The merged message reads back as the original update pair.
+        SimpleCollector collector = new SimpleCollector();
+        createCanalJsonDeserializationSchema(null, null).deserialize(update, collector);
+        assertEquals(2, collector.list.size());
+        assertEquals(RowKind.UPDATE_BEFORE, collector.list.get(0).getRowKind());
+        assertEquals(
+                Arrays.asList(before.getFields()),
+                Arrays.asList(collector.list.get(0).getFields()));
+        assertEquals(RowKind.UPDATE_AFTER, collector.list.get(1).getRowKind());
+        assertEquals(
+                Arrays.asList(after.getFields()), Arrays.asList(collector.list.get(1).getFields()));
     }
 
     @Test

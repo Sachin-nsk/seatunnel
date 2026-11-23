@@ -23,6 +23,7 @@ import org.apache.seatunnel.api.table.type.SeaTunnelDataType;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
 import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions;
 import org.apache.seatunnel.connectors.seatunnel.kafka.config.MessageFormat;
 import org.apache.seatunnel.connectors.seatunnel.kafka.exception.KafkaConnectorException;
 import org.apache.seatunnel.format.avro.AvroFormatOptions;
@@ -50,6 +51,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -71,6 +74,12 @@ public class DefaultSeaTunnelRowSerializer implements SeaTunnelRowSerializer {
     private final Function<SeaTunnelRow, byte[]> valueExtractor;
     private final Function<SeaTunnelRow, Iterable<Header>> headersExtractor;
 
+    /** Set only when {@code merge_update_event} is enabled for {@code canal_json}. */
+    private BiFunction<SeaTunnelRow, SeaTunnelRow, byte[]> updateValueExtractor;
+
+    /** Values of {@code partition_key_fields}, used to check that an update keeps its key. */
+    private Function<SeaTunnelRow, Object[]> keyFieldsExtractor;
+
     @Override
     public ProducerRecord serializeRow(SeaTunnelRow row) {
         return new ProducerRecord(
@@ -80,6 +89,38 @@ public class DefaultSeaTunnelRowSerializer implements SeaTunnelRowSerializer {
                 keyExtractor.apply(row),
                 valueExtractor.apply(row),
                 headersExtractor.apply(row));
+    }
+
+    @Override
+    public boolean supportsUpdateMerge() {
+        return updateValueExtractor != null;
+    }
+
+    @Override
+    public boolean canMergeUpdate(SeaTunnelRow before, SeaTunnelRow after) {
+        return supportsUpdateMerge()
+                && Objects.equals(before.getTableId(), after.getTableId())
+                && Objects.equals(topicExtractor.apply(before), topicExtractor.apply(after))
+                && Objects.equals(partitionExtractor.apply(before), partitionExtractor.apply(after))
+                && Arrays.deepEquals(
+                        keyFieldsExtractor.apply(before), keyFieldsExtractor.apply(after));
+    }
+
+    @Override
+    public ProducerRecord serializeUpdate(SeaTunnelRow before, SeaTunnelRow after) {
+        if (!supportsUpdateMerge()) {
+            throw new UnsupportedOperationException(
+                    "Merging update events is only supported for the canal_json format");
+        }
+        // The key is serialized from the after row, so a merged record gets the same key and
+        // partition as the INSERT record it replaces.
+        return new ProducerRecord(
+                topicExtractor.apply(after),
+                partitionExtractor.apply(after),
+                timestampExtractor.apply(after),
+                keyExtractor.apply(after),
+                updateValueExtractor.apply(before, after),
+                headersExtractor.apply(after));
     }
 
     public static DefaultSeaTunnelRowSerializer create(
@@ -142,14 +183,26 @@ public class DefaultSeaTunnelRowSerializer implements SeaTunnelRowSerializer {
             MessageFormat format,
             String delimiter,
             ReadonlyConfig pluginConfig) {
-        return new DefaultSeaTunnelRowSerializer(
-                topicExtractor(topic, rowType, format),
-                partitionExtractor(partition),
-                timestampExtractor(),
-                keyExtractor(null, rowType, format, delimiter, pluginConfig),
-                valueExtractor(
-                        headerFields, messageValueFields, rowType, format, delimiter, pluginConfig),
-                headersExtractor(headerFields, rowType));
+        return withUpdateMerge(
+                new DefaultSeaTunnelRowSerializer(
+                        topicExtractor(topic, rowType, format),
+                        partitionExtractor(partition),
+                        timestampExtractor(),
+                        keyExtractor(null, rowType, format, delimiter, pluginConfig),
+                        valueExtractor(
+                                headerFields,
+                                messageValueFields,
+                                rowType,
+                                format,
+                                delimiter,
+                                pluginConfig),
+                        headersExtractor(headerFields, rowType)),
+                null,
+                headerFields,
+                messageValueFields,
+                rowType,
+                format,
+                pluginConfig);
     }
 
     public static DefaultSeaTunnelRowSerializer create(
@@ -171,14 +224,87 @@ public class DefaultSeaTunnelRowSerializer implements SeaTunnelRowSerializer {
             MessageFormat format,
             String delimiter,
             ReadonlyConfig pluginConfig) {
-        return new DefaultSeaTunnelRowSerializer(
-                topicExtractor(topic, rowType, format),
-                partitionExtractor(null),
-                timestampExtractor(),
-                keyExtractor(keyFields, rowType, format, delimiter, pluginConfig),
-                valueExtractor(
-                        headerFields, messageValueFields, rowType, format, delimiter, pluginConfig),
-                headersExtractor(headerFields, rowType));
+        return withUpdateMerge(
+                new DefaultSeaTunnelRowSerializer(
+                        topicExtractor(topic, rowType, format),
+                        partitionExtractor(null),
+                        timestampExtractor(),
+                        keyExtractor(keyFields, rowType, format, delimiter, pluginConfig),
+                        valueExtractor(
+                                headerFields,
+                                messageValueFields,
+                                rowType,
+                                format,
+                                delimiter,
+                                pluginConfig),
+                        headersExtractor(headerFields, rowType)),
+                keyFields,
+                headerFields,
+                messageValueFields,
+                rowType,
+                format,
+                pluginConfig);
+    }
+
+    /**
+     * Enables merging of update pairs when {@code merge_update_event} is set for the {@code
+     * canal_json} format. Other formats and configurations are returned unchanged.
+     */
+    private static DefaultSeaTunnelRowSerializer withUpdateMerge(
+            DefaultSeaTunnelRowSerializer serializer,
+            List<String> keyFields,
+            List<String> headerFields,
+            List<String> messageValueFields,
+            SeaTunnelRowType rowType,
+            MessageFormat format,
+            ReadonlyConfig pluginConfig) {
+        if (!MessageFormat.CANAL_JSON.equals(format)
+                || pluginConfig == null
+                || !pluginConfig.get(KafkaSinkOptions.MERGE_UPDATE_EVENT)) {
+            return serializer;
+        }
+        serializer.updateValueExtractor =
+                updateValueExtractor(headerFields, messageValueFields, rowType);
+        serializer.keyFieldsExtractor = keyFieldsExtractor(keyFields, rowType);
+        return serializer;
+    }
+
+    private static BiFunction<SeaTunnelRow, SeaTunnelRow, byte[]> updateValueExtractor(
+            List<String> headerFields, List<String> messageValueFields, SeaTunnelRowType rowType) {
+        if ((headerFields == null || headerFields.isEmpty())
+                && (messageValueFields == null || messageValueFields.isEmpty())) {
+            CanalJsonSerializationSchema serializationSchema =
+                    new CanalJsonSerializationSchema(rowType);
+            return serializationSchema::serializeUpdate;
+        }
+        // Apply the same value projection as the per-row value extractor to both rows.
+        SeaTunnelRowType valueRowType =
+                createValueRowType(headerFields, messageValueFields, rowType);
+        Function<SeaTunnelRow, SeaTunnelRow> valueRowExtractor =
+                createValueRowExtractor(valueRowType, rowType);
+        CanalJsonSerializationSchema serializationSchema =
+                new CanalJsonSerializationSchema(valueRowType);
+        return (before, after) ->
+                serializationSchema.serializeUpdate(
+                        valueRowExtractor.apply(before), valueRowExtractor.apply(after));
+    }
+
+    private static Function<SeaTunnelRow, Object[]> keyFieldsExtractor(
+            List<String> keyFields, SeaTunnelRowType rowType) {
+        if (keyFields == null || keyFields.isEmpty()) {
+            return row -> null;
+        }
+        int[] keyFieldIndexes = new int[keyFields.size()];
+        for (int i = 0; i < keyFields.size(); i++) {
+            keyFieldIndexes[i] = rowType.indexOf(keyFields.get(i));
+        }
+        return row -> {
+            Object[] values = new Object[keyFieldIndexes.length];
+            for (int i = 0; i < keyFieldIndexes.length; i++) {
+                values[i] = row.getField(keyFieldIndexes[i]);
+            }
+            return values;
+        };
     }
 
     private static Function<SeaTunnelRow, Integer> partitionNativeExtractor(

@@ -336,6 +336,10 @@ class KafkaSinkDryRunValidatorTest {
         assertLocalFailure(options, "kafka_message_value_fields is incompatible with format");
         options.remove("kafka_message_value_fields");
         assertLocalFailure(options, "kafka_headers_fields is incompatible with NATIVE format");
+        options.put("merge_update_event", true);
+        assertLocalFailure(options, "merge_update_event is only supported for canal_json format");
+        options.put("format", "DEBEZIUM_JSON");
+        assertLocalFailure(options, "merge_update_event is only supported for canal_json format");
     }
 
     private void assertLocalFailure(Map<String, Object> options, String reason) {

@@ -52,6 +52,7 @@ import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOp
 import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions.FORMAT;
 import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions.KAFKA_HEADERS_FIELDS;
 import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions.KAFKA_MESSAGE_VALUE_FIELDS;
+import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions.MERGE_UPDATE_EVENT;
 import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions.PARTITION;
 import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions.PARTITION_KEY_FIELDS;
 import static org.apache.seatunnel.connectors.seatunnel.kafka.config.KafkaSinkOptions.TOPIC;
@@ -78,6 +79,16 @@ final class KafkaSinkSerializer {
                         "topic references a field absent from the upstream schema",
                         String.format("Field name { %s } is not found!", topic));
             }
+        }
+
+        if (pluginConfig.get(MERGE_UPDATE_EVENT)
+                && !MessageFormat.CANAL_JSON.equals(messageFormat)) {
+            throw new LocalValidationException(
+                    CommonErrorCode.OPERATION_NOT_SUPPORTED,
+                    "merge_update_event is only supported for canal_json format",
+                    String.format(
+                            "merge_update_event is not supported for %s format, it requires canal_json",
+                            messageFormat));
         }
 
         if (pluginConfig.get(KAFKA_MESSAGE_VALUE_FIELDS) != null) {

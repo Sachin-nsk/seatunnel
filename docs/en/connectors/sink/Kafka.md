@@ -65,6 +65,7 @@ They can be downloaded via install-plugin.sh or from the Maven central repositor
 | assign_partitions     | Array  | No       | -       | We can decide which partition to send based on the content of the message. The function of this parameter is to distribute information.                                                                                                                                                                                                                                                                                                                      |
 | transaction_prefix    | String | No       | -       | If `semantics` is `EXACTLY_ONCE`, the producer writes messages in Kafka transactions. Kafka distinguishes transactions by transaction id, so use a different prefix for each job.                                                                                                                                                                                                               |
 | format                | String | No       | json    | Data format. The default format is json. Optional text, canal_json, debezium_json, compatible_debezium_json, ogg_json, maxwell_json, avro, protobuf and native. If you use json or text format. The default field separator is ", ". If you customize the delimiter, add the "field_delimiter" option.If you use canal format, please refer to [canal-json](../formats/canal-json.md) for details.If you use debezium format, please refer to [debezium-json](../formats/debezium-json.md) for details. |
+| merge_update_event    | Boolean | No      | false   | Effective when the format is set to canal_json. Set `true` to write each update as one Canal `UPDATE` message instead of a `DELETE` message followed by an `INSERT` message. See [Merge Update Event](#merge-update-event). |
 | field_delimiter       | String | No       | ,       | Customize the field delimiter for data format.                                                                                                                                                                                                                                                                                                                                                                                                               |
 | common-options        |        | No       | -       | Sink plugin common parameters, please refer to [Sink Common Options](../common-options/sink-common-options.md) for details                                                                                                                                                                                                                                                                                                                                              |
 | protobuf_message_name | String | No       | -       | Effective when the format is set to protobuf, specifies the Message name                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -114,6 +115,32 @@ If name is set as the key, then the hash value of the name column will determine
 If not set partition key fields, the null message key will be sent to.
 The format of the message key is json, If name is set as the key, for example '{"name":"Jack"}'.
 The selected field must be an existing field in the upstream.
+
+### Merge Update Event
+
+Only supported for the `canal_json` format; any other format fails with an error.
+
+By default, an update arrives at the sink as an `UPDATE_BEFORE` row and an `UPDATE_AFTER` row, and the sink writes them as a `DELETE` message followed by an `INSERT` message. With `merge_update_event = true`, the pair is written as one Canal `UPDATE` message, with the new row in `data` and the full old row in `old`:
+
+```json
+{"old":[{"id":1,"name":"a"}],"data":[{"id":1,"name":"b"}],"type":"UPDATE","database":"db","table":"t","ts":1697788900619}
+```
+
+- The merged message uses the topic, partition, key and headers of the new row, so it is routed like the `INSERT` message it replaces.
+- An update is merged only when both rows belong to the same table and go to the same topic, partition and `partition_key_fields` value. Otherwise, for example when a key column or the topic field changes, the sink writes `DELETE` and `INSERT` as before.
+- An `UPDATE_BEFORE` row that is not followed by its `UPDATE_AFTER` row is written as a `DELETE` message, and an `UPDATE_AFTER` row without an `UPDATE_BEFORE` row is written as an `INSERT` message. No row is dropped or reordered.
+- An `UPDATE_BEFORE` row still waiting for its pair at a checkpoint is written as a `DELETE` message before the checkpoint, so it never needs to be kept in the sink state.
+
+```hocon
+sink {
+  Kafka {
+    bootstrap.servers = "localhost:9092"
+    topic = "canal_topic"
+    format = canal_json
+    merge_update_event = true
+  }
+}
+```
 
 ### Kafka Headers Fields
 

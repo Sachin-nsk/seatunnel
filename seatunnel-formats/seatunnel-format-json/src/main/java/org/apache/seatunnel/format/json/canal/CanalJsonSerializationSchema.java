@@ -76,28 +76,51 @@ public class CanalJsonSerializationSchema implements SerializationSchema {
                 return null;
             }
 
-            if (mergeUpdateEventFlag && row.getRowKind() == RowKind.UPDATE_AFTER) {
-                reuse.setField(0, new SeaTunnelRow[] {cacheUpdateBeforeRow});
-            } else {
-                reuse.setField(0, null);
-            }
-
-            reuse.setField(1, new SeaTunnelRow[] {row});
-            reuse.setField(2, rowKind2String(row.getRowKind()));
-
-            if (!StringUtils.isEmpty(row.getTableId())) {
-                reuse.setField(3, TablePath.of(row.getTableId()).getDatabaseName());
-                reuse.setField(4, TablePath.of(row.getTableId()).getTableName());
-            }
-
-            if (row.getOptions() != null && row.getOptions().containsKey(EVENT_TIME.getName())) {
-                reuse.setField(5, row.getOptions().get(EVENT_TIME.getName()));
-            }
-
-            return jsonSerializer.serialize(reuse);
+            SeaTunnelRow[] old =
+                    mergeUpdateEventFlag && row.getRowKind() == RowKind.UPDATE_AFTER
+                            ? new SeaTunnelRow[] {cacheUpdateBeforeRow}
+                            : null;
+            return serializeCanalRow(old, row, rowKind2String(row.getRowKind()));
         } catch (Throwable t) {
             throw CommonError.jsonOperationError(FORMAT, row.toString(), t);
         }
+    }
+
+    /**
+     * Serializes an update pair as one Canal {@code UPDATE} message, with the after row in {@code
+     * data} and the before row in {@code old}.
+     *
+     * <p>Unlike {@link #serialize(SeaTunnelRow)} with {@code mergeUpdateEventFlag}, this method
+     * keeps no state between calls, so the caller decides how before and after rows are paired. The
+     * database, table and timestamp come from the after row.
+     *
+     * @param before the {@link RowKind#UPDATE_BEFORE} row
+     * @param after the {@link RowKind#UPDATE_AFTER} row
+     * @return the serialized Canal JSON message
+     */
+    public byte[] serializeUpdate(SeaTunnelRow before, SeaTunnelRow after) {
+        try {
+            return serializeCanalRow(new SeaTunnelRow[] {before}, after, OP_UPDATE);
+        } catch (Throwable t) {
+            throw CommonError.jsonOperationError(FORMAT, after.toString(), t);
+        }
+    }
+
+    private byte[] serializeCanalRow(SeaTunnelRow[] old, SeaTunnelRow row, String type) {
+        reuse.setField(0, old);
+        reuse.setField(1, new SeaTunnelRow[] {row});
+        reuse.setField(2, type);
+
+        if (!StringUtils.isEmpty(row.getTableId())) {
+            reuse.setField(3, TablePath.of(row.getTableId()).getDatabaseName());
+            reuse.setField(4, TablePath.of(row.getTableId()).getTableName());
+        }
+
+        if (row.getOptions() != null && row.getOptions().containsKey(EVENT_TIME.getName())) {
+            reuse.setField(5, row.getOptions().get(EVENT_TIME.getName()));
+        }
+
+        return jsonSerializer.serialize(reuse);
     }
 
     private String rowKind2String(RowKind rowKind) {

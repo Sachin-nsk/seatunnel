@@ -84,6 +84,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -121,6 +122,8 @@ public class KafkaFormatIT extends TestSuiteBase implements TestResource {
     // ---------------------------Canal Format Parameter---------------------------------------
 
     private static final String CANAL_KAFKA_SINK_TOPIC = "test-canal-sink";
+    private static final String CANAL_MERGE_UPDATE_KAFKA_SINK_TOPIC =
+            "test-canal-merge-update-sink";
     private static final String CANAL_DATA_PATH = "/canal/canal_data.txt";
     private static final String CANAL_KAFKA_SOURCE_TOPIC = "test-cdc_mds";
 
@@ -143,6 +146,7 @@ public class KafkaFormatIT extends TestSuiteBase implements TestResource {
                     COMPATIBLE_KAFKA_SOURCE_TOPIC,
                     DEBEZIUM_KAFKA_SOURCE_TOPIC,
                     CANAL_KAFKA_SINK_TOPIC,
+                    CANAL_MERGE_UPDATE_KAFKA_SINK_TOPIC,
                     OGG_KAFKA_SINK_TOPIC,
                     MAXWELL_KAFKA_SINK_TOPIC,
                     DEBEZIUM_KAFKA_SINK_TOPIC);
@@ -394,6 +398,45 @@ public class KafkaFormatIT extends TestSuiteBase implements TestResource {
                 0, execCanalResultToPgSql.getExitCode(), execCanalResultToPgSql.getStderr());
         // Check Canal
         checkCanalFormat();
+    }
+
+    @TestTemplate
+    public void testFormatCanalMergeUpdateEventCheck(TestContainer container)
+            throws IOException, InterruptedException {
+        LOG.info("====================== Check Canal merge_update_event ======================");
+        Container.ExecResult execResult =
+                container.executeJob(
+                        "/canalFormatIT/kafka_source_canal_to_kafka_merge_update_event.conf");
+        Assertions.assertEquals(0, execResult.getExitCode(), execResult.getStderr());
+
+        // Each source UPDATE is written as one Canal UPDATE message instead of DELETE + INSERT.
+        List<String> expectedResult =
+                Arrays.asList(
+                        "{\"old\":null,\"data\":[{\"id\":1101,\"name\":\"scooter\",\"description\":\"Small 2-wheel scooter\",\"weight\":\"3.14\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1102,\"name\":\"car battery\",\"description\":\"12V car battery\",\"weight\":\"8.1\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1103,\"name\":\"12-pack drill bits\",\"description\":\"12-pack of drill bits with sizes ranging from #40 to #3\",\"weight\":\"0.8\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1104,\"name\":\"hammer\",\"description\":\"12oz carpenter's hammer\",\"weight\":\"0.75\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1105,\"name\":\"hammer\",\"description\":\"14oz carpenter's hammer\",\"weight\":\"0.875\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1106,\"name\":\"hammer\",\"description\":\"16oz carpenter's hammer\",\"weight\":\"1.0\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1107,\"name\":\"rocks\",\"description\":\"box of assorted rocks\",\"weight\":\"5.3\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1108,\"name\":\"jacket\",\"description\":\"water resistent black wind breaker\",\"weight\":\"0.1\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":null,\"data\":[{\"id\":1109,\"name\":\"spare tire\",\"description\":\"24 inch spare tire\",\"weight\":\"22.2\"}],\"type\":\"INSERT\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900618}",
+                        "{\"old\":[{\"id\":1101,\"name\":\"scooter\",\"description\":\"Small 2-wheel scooter\",\"weight\":\"3.14\"}],\"data\":[{\"id\":1101,\"name\":\"scooter\",\"description\":\"Small 2-wheel scooter\",\"weight\":\"4.56\"}],\"type\":\"UPDATE\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900619}",
+                        "{\"old\":[{\"id\":1107,\"name\":\"rocks\",\"description\":\"box of assorted rocks\",\"weight\":\"5.3\"}],\"data\":[{\"id\":1107,\"name\":\"rocks\",\"description\":\"box of assorted rocks\",\"weight\":\"7.88\"}],\"type\":\"UPDATE\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900619}",
+                        "{\"old\":null,\"data\":[{\"id\":1109,\"name\":\"spare tire\",\"description\":\"24 inch spare tire\",\"weight\":\"22.2\"}],\"type\":\"DELETE\",\"database\":null,\"table\":\"test-cdc_mds\",\"ts\":1697788900619}");
+
+        ArrayList<String> result = new ArrayList<>();
+        kafkaConsumer.subscribe(Collections.singletonList(CANAL_MERGE_UPDATE_KAFKA_SINK_TOPIC));
+        await().atMost(60000, TimeUnit.MILLISECONDS)
+                .untilAsserted(
+                        () -> {
+                            ConsumerRecords<String, String> consumerRecords =
+                                    kafkaConsumer.poll(Duration.ofMillis(1000));
+                            for (ConsumerRecord<String, String> record : consumerRecords) {
+                                result.add(record.value());
+                            }
+                            Assertions.assertEquals(expectedResult, result);
+                        });
     }
 
     @TestTemplate
